@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	frameworkai "github.com/goravel/framework/ai"
 	contractsai "github.com/goravel/framework/contracts/ai"
@@ -149,6 +150,85 @@ func TestEncodeDecodeFileIDRoundTrip(t *testing.T) {
 	}
 	if name != file.Name || uri != file.URI || mimeType != file.MIMEType {
 		t.Fatalf("decoded file id mismatch: got (%q, %q, %q)", name, uri, mimeType)
+	}
+}
+
+func TestParseAudioResponseReturnsFirstInlineAudioPart(t *testing.T) {
+	provider := &Provider{}
+
+	response, err := provider.parseAudioResponse(&genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content: &genai.Content{Parts: []*genai.Part{{
+				InlineData: &genai.Blob{Data: []byte("audio-bytes"), MIMEType: "audio/wav"},
+			}}},
+		}},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     2,
+			CandidatesTokenCount: 3,
+			TotalTokenCount:      5,
+		},
+	})
+	if err != nil {
+		t.Fatalf("parseAudioResponse returned error: %v", err)
+	}
+
+	content, err := response.Content()
+	if err != nil {
+		t.Fatalf("audio response content returned error: %v", err)
+	}
+	if !bytes.Equal(content, []byte("audio-bytes")) {
+		t.Fatalf("expected audio bytes, got %q", string(content))
+	}
+	if response.MimeType() != "audio/wav" {
+		t.Fatalf("expected audio/wav mime type, got %q", response.MimeType())
+	}
+	if response.Usage().Total() != 5 {
+		t.Fatalf("expected total usage 5, got %d", response.Usage().Total())
+	}
+}
+
+func TestResolveAudioVoiceMapsFrameworkDefaults(t *testing.T) {
+	provider := &Provider{}
+
+	if got := provider.resolveAudioVoice(""); got != "Aoede" {
+		t.Fatalf("expected empty voice to map to Aoede, got %q", got)
+	}
+	if got := provider.resolveAudioVoice(frameworkai.DefaultFemaleVoice); got != "Aoede" {
+		t.Fatalf("expected female default voice to map to Aoede, got %q", got)
+	}
+	if got := provider.resolveAudioVoice(frameworkai.DefaultMaleVoice); got != "Kore" {
+		t.Fatalf("expected male default voice to map to Kore, got %q", got)
+	}
+	if got := provider.resolveAudioVoice("CustomVoice"); got != "CustomVoice" {
+		t.Fatalf("expected custom voice to pass through, got %q", got)
+	}
+}
+
+func TestTranscriptionPromptTextIncludesLanguageAndDiarizeHints(t *testing.T) {
+	provider := &Provider{}
+	text := provider.transcriptionPromptText(contractsai.TranscriptionPrompt{
+		Language: "en",
+		Diarize:  true,
+	})
+
+	if text != "Transcribe this audio exactly. The spoken language is en. If there are multiple speakers, label the speakers inline in the transcript." {
+		t.Fatalf("unexpected transcription prompt text: %q", text)
+	}
+}
+
+func TestApplyTimeoutSetsHTTPOptionsTimeout(t *testing.T) {
+	timeout := 3 * time.Second
+	contentConfig := &genai.GenerateContentConfig{}
+	imageConfig := &genai.GenerateImagesConfig{}
+
+	applyTimeout(contentConfig, timeout)
+	applyTimeout(imageConfig, timeout)
+
+	if contentConfig.HTTPOptions == nil || contentConfig.HTTPOptions.Timeout == nil || *contentConfig.HTTPOptions.Timeout != timeout {
+		t.Fatalf("expected generate content timeout to be set")
+	}
+	if imageConfig.HTTPOptions == nil || imageConfig.HTTPOptions.Timeout == nil || *imageConfig.HTTPOptions.Timeout != timeout {
+		t.Fatalf("expected generate images timeout to be set")
 	}
 }
 

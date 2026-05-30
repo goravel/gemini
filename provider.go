@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"time"
 
 	frameworkai "github.com/goravel/framework/ai"
 	contractsai "github.com/goravel/framework/contracts/ai"
@@ -19,6 +20,7 @@ import (
 
 const DefaultTextModel = "gemini-2.5-flash"
 const DefaultImageModel = "imagen-4.0-generate-001"
+const DefaultAudioVoice = "Aoede"
 
 const fileIDSeparator = "|"
 
@@ -69,6 +71,68 @@ func (r *Provider) Prompt(ctx context.Context, prompt contractsai.AgentPrompt) (
 
 	text, toolCalls := r.parseGenerateContentResponse(response)
 	return frameworkai.NewTextResponse(text, r.parseUsage(response), toolCalls), nil
+}
+
+func (r *Provider) Audio(ctx context.Context, prompt contractsai.AudioPrompt) (contractsai.AudioResponse, error) {
+	if prompt.Prompt == "" {
+		return nil, errors.AIAudioPromptRequired
+	}
+
+	config := &genai.GenerateContentConfig{
+		ResponseModalities: []string{"AUDIO"},
+		SpeechConfig: &genai.SpeechConfig{
+			VoiceConfig: &genai.VoiceConfig{
+				PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
+					VoiceName: r.resolveAudioVoice(prompt.Voice),
+				},
+			},
+		},
+	}
+	if prompt.Instructions != "" {
+		config.SystemInstruction = &genai.Content{Parts: []*genai.Part{{Text: prompt.Instructions}}}
+	}
+	applyTimeout(config, prompt.Timeout)
+
+	response, err := r.client.Models.GenerateContent(ctx, r.resolveModel(prompt.Model), genai.Text(prompt.Prompt), config)
+	if err != nil {
+		return nil, err
+	}
+
+	return r.parseAudioResponse(response)
+}
+
+func (r *Provider) Transcription(ctx context.Context, prompt contractsai.TranscriptionPrompt) (contractsai.TranscriptionResponse, error) {
+	if isNilInterface(prompt.File) {
+		return nil, errors.AITranscriptionFileRequired
+	}
+
+	content, err := prompt.File.Content(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	mimeType := prompt.File.MimeType()
+	if mimeType == "" {
+		mimeType = fallbackMimeType(prompt.File.FileName())
+	}
+
+	config := &genai.GenerateContentConfig{}
+	applyTimeout(config, prompt.Timeout)
+
+	response, err := r.client.Models.GenerateContent(ctx, r.resolveModel(prompt.Model), []*genai.Content{genai.NewContentFromParts([]*genai.Part{
+		{Text: r.transcriptionPromptText(prompt)},
+		{InlineData: &genai.Blob{Data: content, MIMEType: mimeType}},
+	}, genai.RoleUser)}, config)
+	if err != nil {
+		return nil, err
+	}
+
+	text := strings.TrimSpace(response.Text())
+	if text == "" {
+		return nil, errors.AITranscriptionResponseIsEmpty
+	}
+
+	return frameworkai.NewTranscriptionResponse(text, nil, r.parseUsage(response)), nil
 }
 
 func (r *Provider) Stream(ctx context.Context, prompt contractsai.AgentPrompt) (contractsai.StreamableAgentResponse, error) {
@@ -194,9 +258,12 @@ func (r *Provider) Image(ctx context.Context, prompt contractsai.ImagePrompt) (c
 	}
 
 	if len(prompt.Attachments) == 0 {
-		response, err := r.client.Models.GenerateImages(ctx, r.resolveImageModel(prompt.Model), prompt.Prompt, &genai.GenerateImagesConfig{
+		config := &genai.GenerateImagesConfig{
 			AspectRatio: r.resolveAspectRatio(prompt.Size),
-		})
+		}
+		applyTimeout(config, prompt.Timeout)
+
+		response, err := r.client.Models.GenerateImages(ctx, r.resolveImageModel(prompt.Model), prompt.Prompt, config)
 		if err != nil {
 			return nil, err
 		}
@@ -425,6 +492,27 @@ func (r *Provider) parseGeneratedImages(images []*genai.GeneratedImage) (contrac
 	return frameworkai.NewImageResponse(images[0].Image.ImageBytes, mimeType, frameworkai.NewUsage(0, 0, 0)), nil
 }
 
+func (r *Provider) parseAudioResponse(response *genai.GenerateContentResponse) (contractsai.AudioResponse, error) {
+	if response == nil || len(response.Candidates) == 0 || response.Candidates[0] == nil || response.Candidates[0].Content == nil {
+		return nil, errors.AIAudioResponseIsEmpty
+	}
+
+	for _, part := range response.Candidates[0].Content.Parts {
+		if part == nil || part.InlineData == nil || len(part.InlineData.Data) == 0 {
+			continue
+		}
+
+		mimeType := part.InlineData.MIMEType
+		if mimeType == "" {
+			mimeType = "audio/wav"
+		}
+
+		return frameworkai.NewAudioResponse(part.InlineData.Data, mimeType, r.parseUsage(response)), nil
+	}
+
+	return nil, errors.AIAudioResponseIsEmpty
+}
+
 func (r *Provider) resolveModel(model string) string {
 	if model != "" {
 		return model
@@ -439,6 +527,17 @@ func (r *Provider) resolveImageModel(model string) string {
 	}
 
 	return r.config.Models.Image.Default
+}
+
+func (r *Provider) resolveAudioVoice(voice string) string {
+	switch voice {
+	case "", frameworkai.DefaultFemaleVoice:
+		return DefaultAudioVoice
+	case frameworkai.DefaultMaleVoice:
+		return "Kore"
+	default:
+		return voice
+	}
 }
 
 func (r *Provider) resolveAspectRatio(size contractsai.ImageSize) string {
@@ -518,4 +617,49 @@ func cloneValue(value any) any {
 	}
 
 	return value
+}
+
+func applyTimeout(target any, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+
+	switch config := target.(type) {
+	case *genai.GenerateContentConfig:
+		if config.HTTPOptions == nil {
+			config.HTTPOptions = &genai.HTTPOptions{}
+		}
+		config.HTTPOptions.Timeout = genai.Ptr(timeout)
+	case *genai.GenerateImagesConfig:
+		if config.HTTPOptions == nil {
+			config.HTTPOptions = &genai.HTTPOptions{}
+		}
+		config.HTTPOptions.Timeout = genai.Ptr(timeout)
+	}
+}
+
+func (r *Provider) transcriptionPromptText(prompt contractsai.TranscriptionPrompt) string {
+	parts := []string{"Transcribe this audio exactly."}
+	if prompt.Language != "" {
+		parts = append(parts, "The spoken language is "+prompt.Language+".")
+	}
+	if prompt.Diarize {
+		parts = append(parts, "If there are multiple speakers, label the speakers inline in the transcript.")
+	}
+
+	return strings.Join(parts, " ")
+}
+
+func isNilInterface(value any) bool {
+	if value == nil {
+		return true
+	}
+
+	reflectValue := reflect.ValueOf(value)
+	switch reflectValue.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflectValue.IsNil()
+	default:
+		return false
+	}
 }
