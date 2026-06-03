@@ -16,6 +16,10 @@ func main() {
 	serviceProvider := "&gemini.ServiceProvider{}"
 	aiProviderContract := "github.com/goravel/framework/contracts/ai"
 	geminiFacadesImport := moduleImport + "/facades"
+	env := `
+GEMINI_API_KEY=
+GEMINI_BASE_URL=
+`
 	provider := `map[string]any{
 		"key": config.Env("GEMINI_API_KEY", ""),
 		"models": map[string]any{
@@ -32,7 +36,7 @@ func main() {
 				"default": "",
 			},
 		},
-		"url": config.Env("GEMINI_API_URL", ""),
+		"url": config.Env("GEMINI_BASE_URL", ""),
 		"via": func() (ai.Provider, error) {
 			return geminifacades.Gemini("gemini")
 		},
@@ -46,6 +50,9 @@ func main() {
 			modify.AddImport(aiProviderContract),
 			modify.AddImport(geminiFacadesImport, "geminifacades"),
 		).Find(aiProvidersConfig).Modify(modify.AddConfig("gemini", provider)),
+
+		modify.WhenFileExists(path.Base(".env"), modify.WhenFileNotContains(path.Base(".env"), "GEMINI_API_KEY", modify.File(path.Base(".env")).Append(env))),
+		modify.WhenFileExists(path.Base(".env.example"), modify.WhenFileNotContains(path.Base(".env.example"), "GEMINI_API_KEY", modify.File(path.Base(".env.example")).Append(env))),
 	).Uninstall(
 		modify.WhenFileExists(aiConfigPath, modify.GoFile(aiConfigPath).
 			Find(aiProvidersConfig).Modify(modify.RemoveConfig("gemini")).
