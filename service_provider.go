@@ -1,6 +1,8 @@
 package gemini
 
 import (
+	"fmt"
+
 	"github.com/goravel/framework/contracts/ai"
 	"github.com/goravel/framework/contracts/binding"
 	"github.com/goravel/framework/contracts/foundation"
@@ -37,7 +39,12 @@ func (r *ServiceProvider) Register(app foundation.Application) {
 			return nil, errors.ConfigFacadeNotSet.SetModule(Name)
 		}
 
-		provider, err := NewGemini(config, parameters["provider"].(string))
+		providerName, ok := parameters["provider"].(string)
+		if !ok || providerName == "" {
+			return nil, fmt.Errorf("missing gemini provider parameter")
+		}
+
+		provider, err := NewGemini(config, providerName)
 		if err != nil {
 			return nil, err
 		}
