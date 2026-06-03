@@ -93,7 +93,7 @@ func (r *Provider) Audio(ctx context.Context, prompt contractsai.AudioPrompt) (c
 	}
 	applyTimeout(config, prompt.Timeout)
 
-	response, err := r.client.Models.GenerateContent(ctx, r.resolveModel(prompt.Model), genai.Text(prompt.Prompt), config)
+	response, err := r.client.Models.GenerateContent(ctx, r.resolveAudioModel(prompt.Model), genai.Text(prompt.Prompt), config)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +119,7 @@ func (r *Provider) Transcription(ctx context.Context, prompt contractsai.Transcr
 	config := &genai.GenerateContentConfig{}
 	applyTimeout(config, prompt.Timeout)
 
-	response, err := r.client.Models.GenerateContent(ctx, r.resolveModel(prompt.Model), []*genai.Content{genai.NewContentFromParts([]*genai.Part{
+	response, err := r.client.Models.GenerateContent(ctx, r.resolveTranscriptionModel(prompt.Model), []*genai.Content{genai.NewContentFromParts([]*genai.Part{
 		{Text: r.transcriptionPromptText(prompt)},
 		{InlineData: &genai.Blob{Data: content, MIMEType: mimeType}},
 	}, genai.RoleUser)}, config)
@@ -144,7 +144,7 @@ func (r *Provider) Stream(ctx context.Context, prompt contractsai.AgentPrompt) (
 	return frameworkai.NewStreamableResponse(ctx, func(streamCtx context.Context, emit func(contractsai.StreamEvent) error) (contractsai.AgentResponse, error) {
 		text := strings.Builder{}
 		var finalToolCalls []contractsai.ToolCall
-		var finalUsage contractsai.Usage = frameworkai.NewUsage(0, 0, 0)
+		finalUsage := frameworkai.NewUsage(0, 0, 0)
 
 		for chunk, streamErr := range r.client.Models.GenerateContentStream(streamCtx, r.resolveModel(prompt.Model), contents, config) {
 			if streamErr != nil {
@@ -173,7 +173,7 @@ func (r *Provider) Stream(ctx context.Context, prompt contractsai.AgentPrompt) (
 
 			toolCalls := r.parseFunctionCalls(chunk.FunctionCalls())
 			if len(toolCalls) > 0 {
-				finalToolCalls = toolCalls
+				finalToolCalls = mergeToolCalls(finalToolCalls, toolCalls)
 				if err := emit(contractsai.StreamEvent{
 					Type:      contractsai.StreamEventTypeToolCall,
 					ToolCalls: toolCalls,
@@ -355,9 +355,9 @@ func (r *Provider) buildMessageContent(ctx context.Context, message contractsai.
 			parts = append(parts, genai.NewPartFromText(message.Content))
 		}
 		for _, toolCall := range message.ToolCalls {
-			args := cloneMap(toolCall.Args)
-			if args == nil && toolCall.RawArgs != "" {
-				_ = json.Unmarshal([]byte(toolCall.RawArgs), &args)
+			args, err := parseToolCallArgs(toolCall)
+			if err != nil {
+				return nil, err
 			}
 			if toolCall.ID != "" {
 				toolCallNames[toolCall.ID] = toolCall.Name
@@ -529,6 +529,28 @@ func (r *Provider) resolveImageModel(model string) string {
 	return r.config.Models.Image.Default
 }
 
+func (r *Provider) resolveAudioModel(model string) string {
+	if model != "" {
+		return model
+	}
+	if r.config.Models.Audio.Default != "" {
+		return r.config.Models.Audio.Default
+	}
+
+	return r.resolveModel("")
+}
+
+func (r *Provider) resolveTranscriptionModel(model string) string {
+	if model != "" {
+		return model
+	}
+	if r.config.Models.Transcription.Default != "" {
+		return r.config.Models.Transcription.Default
+	}
+
+	return r.resolveModel("")
+}
+
 func (r *Provider) resolveAudioVoice(voice string) string {
 	switch voice {
 	case "", frameworkai.DefaultFemaleVoice:
@@ -617,6 +639,50 @@ func cloneValue(value any) any {
 	}
 
 	return value
+}
+
+func mergeToolCalls(existing, updates []contractsai.ToolCall) []contractsai.ToolCall {
+	if len(updates) == 0 {
+		return existing
+	}
+	if len(existing) == 0 {
+		return append([]contractsai.ToolCall(nil), updates...)
+	}
+
+	merged := append([]contractsai.ToolCall(nil), existing...)
+	indices := make(map[string]int, len(merged))
+	for i, call := range merged {
+		if call.ID != "" {
+			indices[call.ID] = i
+		}
+	}
+
+	for _, call := range updates {
+		if call.ID != "" {
+			if index, ok := indices[call.ID]; ok {
+				merged[index] = call
+				continue
+			}
+			indices[call.ID] = len(merged)
+		}
+
+		merged = append(merged, call)
+	}
+
+	return merged
+}
+
+func parseToolCallArgs(toolCall contractsai.ToolCall) (map[string]any, error) {
+	args := cloneMap(toolCall.Args)
+	if args != nil || toolCall.RawArgs == "" {
+		return args, nil
+	}
+
+	if err := json.Unmarshal([]byte(toolCall.RawArgs), &args); err != nil {
+		return nil, fmt.Errorf("invalid gemini tool call args for %q: %w", toolCall.Name, err)
+	}
+
+	return args, nil
 }
 
 func applyTimeout(target any, timeout time.Duration) {

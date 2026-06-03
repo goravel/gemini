@@ -20,5 +20,10 @@ func Gemini(provider string) (contractsai.Provider, error) {
 		return nil, err
 	}
 
-	return instance.(contractsai.Provider), nil
+	providerInstance, ok := instance.(contractsai.Provider)
+	if !ok {
+		return nil, fmt.Errorf("resolved gemini binding is %T, not ai.Provider", instance)
+	}
+
+	return providerInstance, nil
 }

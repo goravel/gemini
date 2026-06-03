@@ -2,8 +2,6 @@ module github.com/goravel/gemini
 
 go 1.25.0
 
-toolchain go1.26.1
-
 require (
 	github.com/goravel/framework v1.17.2-0.20260518014420-924313091ddb
 	github.com/stretchr/testify v1.11.1

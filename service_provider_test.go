@@ -13,9 +13,7 @@ import (
 )
 
 func TestServiceProviderRegisterReturnsErrorForMissingProviderParameter(t *testing.T) {
-	app := mockServiceProviderApp(t, func(_ string, _ *contractsai.ProviderConfig) error {
-		return nil
-	})
+	app, _ := mockServiceProviderApp(t)
 
 	callback := registerCallback(t, app)
 	instance, err := callback(app, map[string]any{})
@@ -26,11 +24,13 @@ func TestServiceProviderRegisterReturnsErrorForMissingProviderParameter(t *testi
 }
 
 func TestServiceProviderRegisterBuildsProviderFromParameter(t *testing.T) {
-	app := mockServiceProviderApp(t, func(key string, cfg *contractsai.ProviderConfig) error {
+	app, config := mockServiceProviderApp(t)
+	config.EXPECT().UnmarshalKey("ai.providers.gemini", new(contractsai.ProviderConfig)).RunAndReturn(func(key string, rawVal any) error {
+		cfg := rawVal.(*contractsai.ProviderConfig)
 		assert.Equal(t, "ai.providers.gemini", key)
 		cfg.Key = "test-key"
 		return nil
-	})
+	}).Once()
 
 	callback := registerCallback(t, app)
 	instance, err := callback(app, map[string]any{"provider": "gemini"})
@@ -40,17 +40,14 @@ func TestServiceProviderRegisterBuildsProviderFromParameter(t *testing.T) {
 	assert.True(t, ok)
 }
 
-func mockServiceProviderApp(t *testing.T, unmarshal func(string, *contractsai.ProviderConfig) error) *mocksfoundation.Application {
+func mockServiceProviderApp(t *testing.T) (*mocksfoundation.Application, *mocksconfig.Config) {
 	t.Helper()
 
 	app := mocksfoundation.NewApplication(t)
 	config := mocksconfig.NewConfig(t)
-	config.EXPECT().UnmarshalKey("ai.providers.gemini", new(contractsai.ProviderConfig)).RunAndReturn(func(key string, rawVal any) error {
-		return unmarshal(key, rawVal.(*contractsai.ProviderConfig))
-	}).Maybe()
-	app.EXPECT().MakeConfig().Return(config).Maybe()
+	app.EXPECT().MakeConfig().Return(config).Once()
 
-	return app
+	return app, config
 }
 
 func registerCallback(t *testing.T, app *mocksfoundation.Application) func(contractsfoundation.Application, map[string]any) (any, error) {
@@ -58,9 +55,11 @@ func registerCallback(t *testing.T, app *mocksfoundation.Application) func(contr
 
 	provider := &ServiceProvider{}
 	var callback func(contractsfoundation.Application, map[string]any) (any, error)
-	app.EXPECT().BindWith(Binding, mock.Anything).Run(func(_ any, bindingCallback func(contractsfoundation.Application, map[string]any) (any, error)) {
+	app.EXPECT().BindWith(Binding, mock.MatchedBy(func(bindingCallback func(contractsfoundation.Application, map[string]any) (any, error)) bool {
+		return bindingCallback != nil
+	})).Run(func(_ any, bindingCallback func(contractsfoundation.Application, map[string]any) (any, error)) {
 		callback = bindingCallback
-	})
+	}).Once()
 
 	provider.Register(app)
 	require.NotNil(t, callback)

@@ -6,7 +6,7 @@ The Gemini provider for `facades.AI()` of Goravel.
 
 | goravel/gemini | goravel/framework |
 |----------------|-------------------|
-| v1.17.x        | v1.17.x           |
+| v1.18.x        | v1.18.x           |
 
 ## Install
 

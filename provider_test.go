@@ -3,6 +3,8 @@ package gemini
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -108,6 +110,24 @@ func TestBuildGenerateContentRequestReplaysToolCallsAndResults(t *testing.T) {
 	assertContentRole(t, contents[3], string(genai.RoleUser))
 	assertPartCount(t, contents[3], 1)
 	assertTextPart(t, contents[3].Parts[0], "thanks")
+}
+
+func TestBuildGenerateContentRequestReturnsErrorForInvalidToolCallArgs(t *testing.T) {
+	provider := &Provider{}
+
+	_, _, err := provider.buildGenerateContentRequest(context.Background(), contractsai.AgentPrompt{
+		Agent: stubAgent{messages: []contractsai.Message{{
+			Role:      contractsai.RoleAssistant,
+			ToolCalls: []contractsai.ToolCall{{ID: "call-1", Name: "lookup_weather", RawArgs: `{"city":`}},
+		}}},
+	}, false)
+
+	if err == nil {
+		t.Fatalf("expected invalid tool call args error")
+	}
+	if err.Error() != "invalid gemini tool call args for \"lookup_weather\": unexpected end of JSON input" {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 func TestBuildAttachmentPartUsesStoredGeminiFileURI(t *testing.T) {
@@ -229,6 +249,72 @@ func TestApplyTimeoutSetsHTTPOptionsTimeout(t *testing.T) {
 	}
 	if imageConfig.HTTPOptions == nil || imageConfig.HTTPOptions.Timeout == nil || *imageConfig.HTTPOptions.Timeout != timeout {
 		t.Fatalf("expected generate images timeout to be set")
+	}
+}
+
+func TestResolveAudioModelUsesAudioDefaultBeforeTextDefault(t *testing.T) {
+	provider := &Provider{config: contractsai.ProviderConfig{}}
+	provider.config.Models.Text.Default = "text-default"
+	provider.config.Models.Audio.Default = "audio-default"
+
+	if got := provider.resolveAudioModel(""); got != "audio-default" {
+		t.Fatalf("expected audio model default, got %q", got)
+	}
+}
+
+func TestResolveTranscriptionModelUsesTranscriptionDefaultBeforeTextDefault(t *testing.T) {
+	provider := &Provider{config: contractsai.ProviderConfig{}}
+	provider.config.Models.Text.Default = "text-default"
+	provider.config.Models.Transcription.Default = "transcription-default"
+
+	if got := provider.resolveTranscriptionModel(""); got != "transcription-default" {
+		t.Fatalf("expected transcription model default, got %q", got)
+	}
+}
+
+func TestMergeToolCallsKeepsCallsAcrossStreamChunks(t *testing.T) {
+	merged := mergeToolCalls([]contractsai.ToolCall{{ID: "call-1", Name: "first"}}, []contractsai.ToolCall{{ID: "call-2", Name: "second"}})
+
+	if len(merged) != 2 {
+		t.Fatalf("expected 2 merged tool calls, got %d", len(merged))
+	}
+	if merged[0].ID != "call-1" || merged[1].ID != "call-2" {
+		t.Fatalf("unexpected merged tool calls: %#v", merged)
+	}
+}
+
+func TestMergeToolCallsReplacesExistingCallWithSameID(t *testing.T) {
+	merged := mergeToolCalls([]contractsai.ToolCall{{ID: "call-1", Name: "first", RawArgs: `{}`}}, []contractsai.ToolCall{{ID: "call-1", Name: "updated", RawArgs: `{"city":"London"}`}})
+
+	if len(merged) != 1 {
+		t.Fatalf("expected 1 merged tool call, got %d", len(merged))
+	}
+	if merged[0].Name != "updated" {
+		t.Fatalf("expected updated tool call, got %#v", merged[0])
+	}
+}
+
+func TestParseToolCallArgsUsesExistingArgs(t *testing.T) {
+	args, err := parseToolCallArgs(contractsai.ToolCall{
+		Name: "lookup_weather",
+		Args: map[string]any{"city": "London"},
+	})
+	if err != nil {
+		t.Fatalf("parseToolCallArgs returned error: %v", err)
+	}
+	if got := args["city"]; got != "London" {
+		t.Fatalf("expected city arg London, got %#v", got)
+	}
+}
+
+func TestParseToolCallArgsReturnsErrorForInvalidJSON(t *testing.T) {
+	_, err := parseToolCallArgs(contractsai.ToolCall{Name: "lookup_weather", RawArgs: `{"city":`})
+	if err == nil {
+		t.Fatalf("expected invalid JSON error")
+	}
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Fatalf("expected syntax error, got %T", err)
 	}
 }
 
