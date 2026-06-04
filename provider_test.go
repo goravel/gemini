@@ -1,7 +1,6 @@
 package gemini
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +10,7 @@ import (
 	frameworkai "github.com/goravel/framework/ai"
 	contractsai "github.com/goravel/framework/contracts/ai"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/genai"
 )
 
@@ -45,12 +45,8 @@ func TestBuildGenerateContentRequestAttachesFollowUpAttachmentsToActiveUserTurn(
 		}},
 		Attachments: []contractsai.Attachment{attachment},
 	}, false)
-	if err != nil {
-		t.Fatalf("buildGenerateContentRequest returned error: %v", err)
-	}
-	if len(contents) != 3 {
-		t.Fatalf("expected 3 content items, got %d", len(contents))
-	}
+	require.NoError(t, err)
+	require.Len(t, contents, 3)
 
 	assertContentRole(t, contents[0], string(genai.RoleUser))
 	assertPartCount(t, contents[0], 2)
@@ -69,44 +65,24 @@ func TestBuildGenerateContentRequestReplaysToolCallsAndResults(t *testing.T) {
 		}},
 		Input: "thanks",
 	}, false)
-	if err != nil {
-		t.Fatalf("buildGenerateContentRequest returned error: %v", err)
-	}
-	if len(contents) != 4 {
-		t.Fatalf("expected 4 content items, got %d", len(contents))
-	}
+	require.NoError(t, err)
+	require.Len(t, contents, 4)
 
 	assertContentRole(t, contents[1], string(genai.RoleModel))
 	assertPartCount(t, contents[1], 1)
 	functionCall := contents[1].Parts[0].FunctionCall
-	if functionCall == nil {
-		t.Fatalf("expected assistant function call part")
-	}
-	if functionCall.ID != "call-1" {
-		t.Fatalf("expected function call id call-1, got %q", functionCall.ID)
-	}
-	if functionCall.Name != "lookup_weather" {
-		t.Fatalf("expected function call name lookup_weather, got %q", functionCall.Name)
-	}
-	if got := functionCall.Args["city"]; got != "London" {
-		t.Fatalf("expected parsed raw args city=London, got %#v", got)
-	}
+	require.NotNil(t, functionCall)
+	assert.Equal(t, "call-1", functionCall.ID)
+	assert.Equal(t, "lookup_weather", functionCall.Name)
+	assert.Equal(t, "London", functionCall.Args["city"])
 
 	assertContentRole(t, contents[2], string(genai.RoleUser))
 	assertPartCount(t, contents[2], 1)
 	functionResponse := contents[2].Parts[0].FunctionResponse
-	if functionResponse == nil {
-		t.Fatalf("expected tool result function response part")
-	}
-	if functionResponse.ID != "call-1" {
-		t.Fatalf("expected function response id call-1, got %q", functionResponse.ID)
-	}
-	if functionResponse.Name != "lookup_weather" {
-		t.Fatalf("expected function response name lookup_weather, got %q", functionResponse.Name)
-	}
-	if got := functionResponse.Response["output"]; got != "sunny" {
-		t.Fatalf("expected tool output sunny, got %#v", got)
-	}
+	require.NotNil(t, functionResponse)
+	assert.Equal(t, "call-1", functionResponse.ID)
+	assert.Equal(t, "lookup_weather", functionResponse.Name)
+	assert.Equal(t, "sunny", functionResponse.Response["output"])
 
 	assertContentRole(t, contents[3], string(genai.RoleUser))
 	assertPartCount(t, contents[3], 1)
@@ -135,21 +111,12 @@ func TestBuildAttachmentPartUsesStoredGeminiFileURI(t *testing.T) {
 	}
 
 	part, err := provider.buildAttachmentPart(context.Background(), frameworkai.ImageFromID(encodeFileID(file)))
-	if err != nil {
-		t.Fatalf("buildAttachmentPart returned error: %v", err)
-	}
-	if part.FileData == nil {
-		t.Fatalf("expected file-data part for stored Gemini file")
-	}
-	if part.FileData.FileURI != file.URI {
-		t.Fatalf("expected file uri %q, got %q", file.URI, part.FileData.FileURI)
-	}
-	if part.FileData.MIMEType != file.MIMEType {
-		t.Fatalf("expected file mime type %q, got %q", file.MIMEType, part.FileData.MIMEType)
-	}
-	if part.InlineData != nil {
-		t.Fatalf("expected stored file part to avoid inline bytes")
-	}
+	require.NoError(t, err)
+	require.NotNil(t, part)
+	require.NotNil(t, part.FileData)
+	assert.Equal(t, file.URI, part.FileData.FileURI)
+	assert.Equal(t, file.MIMEType, part.FileData.MIMEType)
+	assert.Nil(t, part.InlineData)
 }
 
 func TestEncodeDecodeFileIDRoundTrip(t *testing.T) {
@@ -161,12 +128,10 @@ func TestEncodeDecodeFileIDRoundTrip(t *testing.T) {
 
 	encoded := encodeFileID(file)
 	name, uri, mimeType, err := decodeFileID(encoded)
-	if err != nil {
-		t.Fatalf("decodeFileID returned error: %v", err)
-	}
-	if name != file.Name || uri != file.URI || mimeType != file.MIMEType {
-		t.Fatalf("decoded file id mismatch: got (%q, %q, %q)", name, uri, mimeType)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, file.Name, name)
+	assert.Equal(t, file.URI, uri)
+	assert.Equal(t, file.MIMEType, mimeType)
 }
 
 func TestParseAudioResponseReturnsFirstInlineAudioPart(t *testing.T) {
@@ -184,40 +149,22 @@ func TestParseAudioResponseReturnsFirstInlineAudioPart(t *testing.T) {
 			TotalTokenCount:      5,
 		},
 	})
-	if err != nil {
-		t.Fatalf("parseAudioResponse returned error: %v", err)
-	}
+	require.NoError(t, err)
 
 	content, err := response.Content()
-	if err != nil {
-		t.Fatalf("audio response content returned error: %v", err)
-	}
-	if !bytes.Equal(content, []byte("audio-bytes")) {
-		t.Fatalf("expected audio bytes, got %q", string(content))
-	}
-	if response.MimeType() != "audio/wav" {
-		t.Fatalf("expected audio/wav mime type, got %q", response.MimeType())
-	}
-	if response.Usage().Total() != 5 {
-		t.Fatalf("expected total usage 5, got %d", response.Usage().Total())
-	}
+	require.NoError(t, err)
+	assert.Equal(t, []byte("audio-bytes"), content)
+	assert.Equal(t, "audio/wav", response.MimeType())
+	assert.Equal(t, 5, response.Usage().Total())
 }
 
 func TestResolveAudioVoiceMapsFrameworkDefaults(t *testing.T) {
 	provider := &Provider{}
 
-	if got := provider.resolveAudioVoice(""); got != "Aoede" {
-		t.Fatalf("expected empty voice to map to Aoede, got %q", got)
-	}
-	if got := provider.resolveAudioVoice(frameworkai.DefaultFemaleVoice); got != "Aoede" {
-		t.Fatalf("expected female default voice to map to Aoede, got %q", got)
-	}
-	if got := provider.resolveAudioVoice(frameworkai.DefaultMaleVoice); got != "Kore" {
-		t.Fatalf("expected male default voice to map to Kore, got %q", got)
-	}
-	if got := provider.resolveAudioVoice("CustomVoice"); got != "CustomVoice" {
-		t.Fatalf("expected custom voice to pass through, got %q", got)
-	}
+	assert.Equal(t, "Aoede", provider.resolveAudioVoice(""))
+	assert.Equal(t, "Aoede", provider.resolveAudioVoice(frameworkai.DefaultFemaleVoice))
+	assert.Equal(t, "Kore", provider.resolveAudioVoice(frameworkai.DefaultMaleVoice))
+	assert.Equal(t, "CustomVoice", provider.resolveAudioVoice("CustomVoice"))
 }
 
 func TestTranscriptionPromptTextIncludesLanguageAndDiarizeHints(t *testing.T) {
@@ -227,9 +174,7 @@ func TestTranscriptionPromptTextIncludesLanguageAndDiarizeHints(t *testing.T) {
 		Diarize:  true,
 	})
 
-	if text != "Transcribe this audio exactly. The spoken language is en. If there are multiple speakers, label the speakers inline in the transcript." {
-		t.Fatalf("unexpected transcription prompt text: %q", text)
-	}
+	assert.Equal(t, "Transcribe this audio exactly. The spoken language is en. If there are multiple speakers, label the speakers inline in the transcript.", text)
 }
 
 func TestApplyTimeoutSetsHTTPOptionsTimeout(t *testing.T) {
@@ -240,12 +185,12 @@ func TestApplyTimeoutSetsHTTPOptionsTimeout(t *testing.T) {
 	applyTimeout(contentConfig, timeout)
 	applyTimeout(imageConfig, timeout)
 
-	if contentConfig.HTTPOptions == nil || contentConfig.HTTPOptions.Timeout == nil || *contentConfig.HTTPOptions.Timeout != timeout {
-		t.Fatalf("expected generate content timeout to be set")
-	}
-	if imageConfig.HTTPOptions == nil || imageConfig.HTTPOptions.Timeout == nil || *imageConfig.HTTPOptions.Timeout != timeout {
-		t.Fatalf("expected generate images timeout to be set")
-	}
+	require.NotNil(t, contentConfig.HTTPOptions)
+	require.NotNil(t, contentConfig.HTTPOptions.Timeout)
+	require.NotNil(t, imageConfig.HTTPOptions)
+	require.NotNil(t, imageConfig.HTTPOptions.Timeout)
+	assert.Equal(t, timeout, *contentConfig.HTTPOptions.Timeout)
+	assert.Equal(t, timeout, *imageConfig.HTTPOptions.Timeout)
 }
 
 func TestResolveAudioModelUsesAudioDefaultBeforeTextDefault(t *testing.T) {
@@ -253,9 +198,7 @@ func TestResolveAudioModelUsesAudioDefaultBeforeTextDefault(t *testing.T) {
 	provider.config.Models.Text.Default = "text-default"
 	provider.config.Models.Audio.Default = "audio-default"
 
-	if got := provider.resolveAudioModel(""); got != "audio-default" {
-		t.Fatalf("expected audio model default, got %q", got)
-	}
+	assert.Equal(t, "audio-default", provider.resolveAudioModel(""))
 }
 
 func TestResolveTranscriptionModelUsesTranscriptionDefaultBeforeTextDefault(t *testing.T) {
@@ -263,31 +206,22 @@ func TestResolveTranscriptionModelUsesTranscriptionDefaultBeforeTextDefault(t *t
 	provider.config.Models.Text.Default = "text-default"
 	provider.config.Models.Transcription.Default = "transcription-default"
 
-	if got := provider.resolveTranscriptionModel(""); got != "transcription-default" {
-		t.Fatalf("expected transcription model default, got %q", got)
-	}
+	assert.Equal(t, "transcription-default", provider.resolveTranscriptionModel(""))
 }
 
 func TestMergeToolCallsKeepsCallsAcrossStreamChunks(t *testing.T) {
 	merged := mergeToolCalls([]contractsai.ToolCall{{ID: "call-1", Name: "first"}}, []contractsai.ToolCall{{ID: "call-2", Name: "second"}})
 
-	if len(merged) != 2 {
-		t.Fatalf("expected 2 merged tool calls, got %d", len(merged))
-	}
-	if merged[0].ID != "call-1" || merged[1].ID != "call-2" {
-		t.Fatalf("unexpected merged tool calls: %#v", merged)
-	}
+	require.Len(t, merged, 2)
+	assert.Equal(t, "call-1", merged[0].ID)
+	assert.Equal(t, "call-2", merged[1].ID)
 }
 
 func TestMergeToolCallsReplacesExistingCallWithSameID(t *testing.T) {
 	merged := mergeToolCalls([]contractsai.ToolCall{{ID: "call-1", Name: "first", RawArgs: `{}`}}, []contractsai.ToolCall{{ID: "call-1", Name: "updated", RawArgs: `{"city":"London"}`}})
 
-	if len(merged) != 1 {
-		t.Fatalf("expected 1 merged tool call, got %d", len(merged))
-	}
-	if merged[0].Name != "updated" {
-		t.Fatalf("expected updated tool call, got %#v", merged[0])
-	}
+	require.Len(t, merged, 1)
+	assert.Equal(t, "updated", merged[0].Name)
 }
 
 func TestParseToolCallArgsUsesExistingArgs(t *testing.T) {
@@ -295,64 +229,39 @@ func TestParseToolCallArgsUsesExistingArgs(t *testing.T) {
 		Name: "lookup_weather",
 		Args: map[string]any{"city": "London"},
 	})
-	if err != nil {
-		t.Fatalf("parseToolCallArgs returned error: %v", err)
-	}
-	if got := args["city"]; got != "London" {
-		t.Fatalf("expected city arg London, got %#v", got)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "London", args["city"])
 }
 
 func TestParseToolCallArgsReturnsErrorForInvalidJSON(t *testing.T) {
 	_, err := parseToolCallArgs(contractsai.ToolCall{Name: "lookup_weather", RawArgs: `{"city":`})
-	if err == nil {
-		t.Fatalf("expected invalid JSON error")
-	}
+	require.Error(t, err)
 	var syntaxErr *json.SyntaxError
-	if !errors.As(err, &syntaxErr) {
-		t.Fatalf("expected syntax error, got %T", err)
-	}
+	assert.True(t, errors.As(err, &syntaxErr))
 }
 
 func assertContentRole(t *testing.T, content *genai.Content, expected string) {
 	t.Helper()
-	if content == nil {
-		t.Fatalf("expected content, got nil")
-	}
-	if content.Role != expected {
-		t.Fatalf("expected role %q, got %q", expected, content.Role)
-	}
+	require.NotNil(t, content)
+	assert.Equal(t, expected, content.Role)
 }
 
 func assertPartCount(t *testing.T, content *genai.Content, expected int) {
 	t.Helper()
-	if content == nil {
-		t.Fatalf("expected content, got nil")
-	}
-	if len(content.Parts) != expected {
-		t.Fatalf("expected %d parts, got %d", expected, len(content.Parts))
-	}
+	require.NotNil(t, content)
+	assert.Len(t, content.Parts, expected)
 }
 
 func assertTextPart(t *testing.T, part *genai.Part, expected string) {
 	t.Helper()
-	if part == nil {
-		t.Fatalf("expected part, got nil")
-	}
-	if part.Text != expected {
-		t.Fatalf("expected text %q, got %q", expected, part.Text)
-	}
+	require.NotNil(t, part)
+	assert.Equal(t, expected, part.Text)
 }
 
 func assertInlineDataPart(t *testing.T, part *genai.Part, expectedMimeType string, expectedData []byte) {
 	t.Helper()
-	if part == nil || part.InlineData == nil {
-		t.Fatalf("expected inline data part")
-	}
-	if part.InlineData.MIMEType != expectedMimeType {
-		t.Fatalf("expected inline mime type %q, got %q", expectedMimeType, part.InlineData.MIMEType)
-	}
-	if !bytes.Equal(part.InlineData.Data, expectedData) {
-		t.Fatalf("expected inline data %q, got %q", string(expectedData), string(part.InlineData.Data))
-	}
+	require.NotNil(t, part)
+	require.NotNil(t, part.InlineData)
+	assert.Equal(t, expectedMimeType, part.InlineData.MIMEType)
+	assert.Equal(t, expectedData, part.InlineData.Data)
 }
