@@ -89,6 +89,31 @@ func TestBuildGenerateContentRequestReplaysToolCallsAndResults(t *testing.T) {
 	assertTextPart(t, contents[3].Parts[0], "thanks")
 }
 
+func TestBuildGenerateContentRequestReplaysEmptyToolCallIDByName(t *testing.T) {
+	provider := &Provider{}
+
+	contents, _, err := provider.buildGenerateContentRequest(context.Background(), contractsai.AgentPrompt{
+		Agent: stubAgent{messages: []contractsai.Message{
+			{Role: contractsai.RoleUser, Content: "question"},
+			{Role: contractsai.RoleAssistant, ToolCalls: []contractsai.ToolCall{{Name: "get_weather", RawArgs: `{"city":"London"}`}}},
+			{Role: contractsai.RoleToolResult, Content: "sunny"},
+		}},
+	}, false)
+	require.NoError(t, err)
+	require.Len(t, contents, 3)
+
+	functionCall := contents[1].Parts[0].FunctionCall
+	require.NotNil(t, functionCall)
+	assert.Equal(t, "get_weather", functionCall.ID)
+	assert.Equal(t, "get_weather", functionCall.Name)
+
+	functionResponse := contents[2].Parts[0].FunctionResponse
+	require.NotNil(t, functionResponse)
+	assert.Equal(t, "get_weather", functionResponse.ID)
+	assert.Equal(t, "get_weather", functionResponse.Name)
+	assert.Equal(t, "sunny", functionResponse.Response["output"])
+}
+
 func TestBuildGenerateContentRequestReturnsErrorForInvalidToolCallArgs(t *testing.T) {
 	provider := &Provider{}
 
@@ -238,6 +263,33 @@ func TestParseToolCallArgsReturnsErrorForInvalidJSON(t *testing.T) {
 	require.Error(t, err)
 	var syntaxErr *json.SyntaxError
 	assert.True(t, errors.As(err, &syntaxErr))
+}
+
+func TestParseFunctionCallsGeneratesIDWhenGeminiOmitsID(t *testing.T) {
+	provider := &Provider{}
+
+	toolCalls := provider.parseFunctionCalls([]*genai.FunctionCall{{
+		Name: "get_weather",
+		Args: map[string]any{"city": "London"},
+	}})
+
+	require.Len(t, toolCalls, 1)
+	assert.Equal(t, "get_weather", toolCalls[0].ID)
+	assert.Equal(t, "get_weather", toolCalls[0].Name)
+	assert.Equal(t, map[string]any{"city": "London"}, toolCalls[0].Args)
+}
+
+func TestParseFunctionCallsDisambiguatesRepeatedGeneratedIDs(t *testing.T) {
+	provider := &Provider{}
+
+	toolCalls := provider.parseFunctionCalls([]*genai.FunctionCall{
+		{Name: "get_weather", Args: map[string]any{"city": "London"}},
+		{Name: "get_weather", Args: map[string]any{"city": "Paris"}},
+	})
+
+	require.Len(t, toolCalls, 2)
+	assert.Equal(t, "get_weather", toolCalls[0].ID)
+	assert.Equal(t, "get_weather_2", toolCalls[1].ID)
 }
 
 func assertContentRole(t *testing.T, content *genai.Content, expected string) {

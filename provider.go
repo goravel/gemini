@@ -174,12 +174,6 @@ func (r *Provider) Stream(ctx context.Context, prompt contractsai.AgentPrompt) (
 			toolCalls := r.parseFunctionCalls(chunk.FunctionCalls())
 			if len(toolCalls) > 0 {
 				finalToolCalls = mergeToolCalls(finalToolCalls, toolCalls)
-				if err := emit(contractsai.StreamEvent{
-					Type:      contractsai.StreamEventTypeToolCall,
-					ToolCalls: toolCalls,
-				}); err != nil {
-					return nil, err
-				}
 			}
 
 			finalUsage = r.parseUsage(chunk)
@@ -359,11 +353,18 @@ func (r *Provider) buildMessageContent(ctx context.Context, message contractsai.
 			if err != nil {
 				return nil, err
 			}
-			if toolCall.ID != "" {
-				toolCallNames[toolCall.ID] = toolCall.Name
+			callID := toolCall.ID
+			if callID == "" {
+				callID = toolCall.Name
+			}
+			if callID != "" {
+				toolCallNames[callID] = toolCall.Name
+			}
+			if toolCall.ID == "" && toolCall.Name != "" {
+				toolCallNames[""] = toolCall.Name
 			}
 			parts = append(parts, &genai.Part{FunctionCall: &genai.FunctionCall{
-				ID:   toolCall.ID,
+				ID:   callID,
 				Name: toolCall.Name,
 				Args: args,
 			}})
@@ -378,8 +379,15 @@ func (r *Provider) buildMessageContent(ctx context.Context, message contractsai.
 		if toolName == "" {
 			toolName = message.ToolCallID
 		}
+		if toolName == "" {
+			return nil, fmt.Errorf("missing gemini tool result name for tool call %q", message.ToolCallID)
+		}
+		callID := message.ToolCallID
+		if callID == "" {
+			callID = toolName
+		}
 		parts = append(parts, &genai.Part{FunctionResponse: &genai.FunctionResponse{
-			ID:       message.ToolCallID,
+			ID:       callID,
 			Name:     toolName,
 			Response: response,
 		}})
@@ -440,6 +448,7 @@ func (r *Provider) parseFunctionCalls(calls []*genai.FunctionCall) []contractsai
 	}
 
 	toolCalls := make([]contractsai.ToolCall, 0, len(calls))
+	usedIDs := make(map[string]int)
 	for _, call := range calls {
 		if call == nil {
 			continue
@@ -452,8 +461,10 @@ func (r *Provider) parseFunctionCalls(calls []*genai.FunctionCall) []contractsai
 			}
 		}
 
+		id := generatedToolCallID(call, usedIDs)
+
 		toolCalls = append(toolCalls, contractsai.ToolCall{
-			ID:      call.ID,
+			ID:      id,
 			Name:    call.Name,
 			Args:    cloneMap(call.Args),
 			RawArgs: rawArgs,
@@ -465,6 +476,23 @@ func (r *Provider) parseFunctionCalls(calls []*genai.FunctionCall) []contractsai
 	}
 
 	return toolCalls
+}
+
+func generatedToolCallID(call *genai.FunctionCall, usedIDs map[string]int) string {
+	id := call.ID
+	if id == "" {
+		id = call.Name
+	}
+	if id == "" {
+		id = "tool_call"
+	}
+
+	usedIDs[id]++
+	if usedIDs[id] == 1 {
+		return id
+	}
+
+	return fmt.Sprintf("%s_%d", id, usedIDs[id])
 }
 
 func (r *Provider) parseUsage(response *genai.GenerateContentResponse) contractsai.Usage {
