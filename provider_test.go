@@ -10,6 +10,7 @@ import (
 
 	frameworkai "github.com/goravel/framework/ai"
 	contractsai "github.com/goravel/framework/contracts/ai"
+	"github.com/stretchr/testify/assert"
 	"google.golang.org/genai"
 )
 
@@ -122,12 +123,7 @@ func TestBuildGenerateContentRequestReturnsErrorForInvalidToolCallArgs(t *testin
 		}}},
 	}, false)
 
-	if err == nil {
-		t.Fatalf("expected invalid tool call args error")
-	}
-	if err.Error() != "invalid gemini tool call args for \"lookup_weather\": unexpected end of JSON input" {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	assert.EqualError(t, err, "invalid gemini tool call args for \"lookup_weather\": unexpected end of JSON input")
 }
 
 func TestBuildAttachmentPartUsesStoredGeminiFileURI(t *testing.T) {
