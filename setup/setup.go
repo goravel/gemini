@@ -36,6 +36,7 @@ GEMINI_BASE_URL=
 				"default": "",
 			},
 		},
+		"failover": map[string][]string{},
 		"url": config.Env("GEMINI_BASE_URL", ""),
 		"via": func() (ai.Provider, error) {
 			return geminifacades.Gemini("gemini")

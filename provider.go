@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"mime"
+	"net/http"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -24,14 +26,27 @@ const DefaultAudioVoice = "Aoede"
 
 const fileIDSeparator = "|"
 
+const (
+	defaultFailoverReasonRateLimited         contractsai.FailoverReason = "rate_limited"
+	defaultFailoverReasonInsufficientCredits contractsai.FailoverReason = "insufficient_credits"
+	defaultFailoverReasonProviderOverloaded  contractsai.FailoverReason = "provider_overloaded"
+)
+
 type Provider struct {
-	client *genai.Client
-	config contractsai.ProviderConfig
+	client        *genai.Client
+	config        contractsai.ProviderConfig
+	failoverRules *frameworkai.FailoverRules
+	name          string
 }
 
 func NewGemini(config contractsconfig.Config, provider string) (*Provider, error) {
 	var providerConfig contractsai.ProviderConfig
 	if err := config.UnmarshalKey("ai.providers."+provider, &providerConfig); err != nil {
+		return nil, err
+	}
+
+	failoverRules, err := newFailoverRules(provider, providerConfig.Failover)
+	if err != nil {
 		return nil, err
 	}
 
@@ -55,7 +70,12 @@ func NewGemini(config contractsconfig.Config, provider string) (*Provider, error
 		return nil, err
 	}
 
-	return &Provider{client: client, config: providerConfig}, nil
+	return &Provider{
+		client:        client,
+		config:        providerConfig,
+		failoverRules: failoverRules,
+		name:          provider,
+	}, nil
 }
 
 func (r *Provider) Prompt(ctx context.Context, prompt contractsai.AgentPrompt) (contractsai.AgentResponse, error) {
@@ -66,7 +86,7 @@ func (r *Provider) Prompt(ctx context.Context, prompt contractsai.AgentPrompt) (
 
 	response, err := r.client.Models.GenerateContent(ctx, r.resolveModel(prompt.Model), contents, config)
 	if err != nil {
-		return nil, err
+		return nil, r.failoverError(err)
 	}
 
 	text, toolCalls := r.parseGenerateContentResponse(response)
@@ -95,7 +115,7 @@ func (r *Provider) Audio(ctx context.Context, prompt contractsai.AudioPrompt) (c
 
 	response, err := r.client.Models.GenerateContent(ctx, r.resolveAudioModel(prompt.Model), genai.Text(prompt.Prompt), config)
 	if err != nil {
-		return nil, err
+		return nil, r.failoverError(err)
 	}
 
 	return r.parseAudioResponse(response)
@@ -124,7 +144,7 @@ func (r *Provider) Transcription(ctx context.Context, prompt contractsai.Transcr
 		{InlineData: &genai.Blob{Data: content, MIMEType: mimeType}},
 	}, genai.RoleUser)}, config)
 	if err != nil {
-		return nil, err
+		return nil, r.failoverError(err)
 	}
 
 	text := strings.TrimSpace(response.Text())
@@ -157,7 +177,7 @@ func (r *Provider) Stream(ctx context.Context, prompt contractsai.AgentPrompt) (
 					}
 				}
 
-				return nil, streamErr
+				return nil, r.failoverError(streamErr)
 			}
 
 			delta := chunk.Text()
@@ -206,7 +226,7 @@ func (r *Provider) PutFile(ctx context.Context, file contractsai.StorableFile) (
 		MIMEType:    mimeType,
 	})
 	if err != nil {
-		return nil, err
+		return nil, r.failoverError(err)
 	}
 
 	return frameworkai.NewFileResponse(encodeFileID(uploaded), uploaded.MIMEType, nil), nil
@@ -220,12 +240,12 @@ func (r *Provider) GetFile(ctx context.Context, id string) (contractsai.FileResp
 
 	file, err := r.client.Files.Get(ctx, name, nil)
 	if err != nil {
-		return nil, err
+		return nil, r.failoverError(err)
 	}
 
 	content, err := r.client.Files.Download(ctx, genai.NewDownloadURIFromFile(file), nil)
 	if err != nil {
-		return nil, err
+		return nil, r.failoverError(err)
 	}
 
 	return frameworkai.NewFileResponse(encodeFileID(file), file.MIMEType, content), nil
@@ -238,7 +258,11 @@ func (r *Provider) DeleteFile(ctx context.Context, id string) error {
 	}
 
 	_, err = r.client.Files.Delete(ctx, name, nil)
-	return err
+	if err != nil {
+		return r.failoverError(err)
+	}
+
+	return nil
 }
 
 func (r *Provider) Image(ctx context.Context, prompt contractsai.ImagePrompt) (contractsai.ImageResponse, error) {
@@ -259,13 +283,69 @@ func (r *Provider) Image(ctx context.Context, prompt contractsai.ImagePrompt) (c
 
 		response, err := r.client.Models.GenerateImages(ctx, r.resolveImageModel(prompt.Model), prompt.Prompt, config)
 		if err != nil {
-			return nil, err
+			return nil, r.failoverError(err)
 		}
 
 		return r.parseGeneratedImages(response.GeneratedImages)
 	}
 
 	return nil, fmt.Errorf("gemini provider does not support attachment-based image editing on Gemini API")
+}
+
+func (r *Provider) failoverError(err error) error {
+	var apiErr genai.APIError
+	if stderrors.As(err, &apiErr) {
+		switch apiErr.Code {
+		case http.StatusTooManyRequests:
+			return frameworkai.NewFailoverError(r.providerName(), defaultFailoverReasonRateLimited, err)
+		case http.StatusPaymentRequired:
+			return frameworkai.NewFailoverError(r.providerName(), defaultFailoverReasonInsufficientCredits, err)
+		case http.StatusServiceUnavailable:
+			return frameworkai.NewFailoverError(r.providerName(), defaultFailoverReasonProviderOverloaded, err)
+		}
+	}
+
+	if r.failoverRules == nil {
+		return err
+	}
+
+	return r.failoverRules.Wrap(r.providerName(), err)
+}
+
+func (r *Provider) providerName() string {
+	if r.name != "" {
+		return r.name
+	}
+
+	return "gemini"
+}
+
+func newFailoverRules(provider string, patterns map[contractsai.FailoverReason][]string) (*frameworkai.FailoverRules, error) {
+	if !hasFailoverPatterns(patterns) {
+		return nil, nil
+	}
+
+	rules, err := frameworkai.NewFailoverRules(provider, patterns)
+	if err != nil {
+		return nil, err
+	}
+
+	return &rules, nil
+}
+
+func hasFailoverPatterns(patterns map[contractsai.FailoverReason][]string) bool {
+	for reason, reasonPatterns := range patterns {
+		if reason == "" {
+			continue
+		}
+		for _, pattern := range reasonPatterns {
+			if pattern != "" {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (r *Provider) buildGenerateContentRequest(ctx context.Context, prompt contractsai.AgentPrompt, imageOutput bool) ([]*genai.Content, *genai.GenerateContentConfig, error) {
