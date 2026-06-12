@@ -133,14 +133,12 @@ func TestProviderFailoverErrorReturnsOriginalError(t *testing.T) {
 }
 
 func TestProviderFailoverErrorUsesConfiguredRules(t *testing.T) {
-	provider := &Provider{name: "gemini-primary"}
-
 	customErr := providerTestError("maximum context length exceeded")
 	rules, err := frameworkai.NewFailoverRules("gemini-primary", map[contractsai.FailoverReason][]string{
 		"context_length_exceeded": {"context length"},
 	})
 	require.NoError(t, err)
-	provider = &Provider{name: "gemini-primary", failoverRules: &rules}
+	provider := &Provider{name: "gemini-primary", failoverRules: &rules}
 	err = provider.failoverError(customErr)
 
 	var failoverErr contractsai.FailoverError
