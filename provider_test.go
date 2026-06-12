@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
 	frameworkai "github.com/goravel/framework/ai"
 	contractsai "github.com/goravel/framework/contracts/ai"
+	frameworkerrors "github.com/goravel/framework/errors"
+	mocksconfig "github.com/goravel/framework/mocks/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genai"
@@ -32,6 +35,118 @@ func (s stubAgent) Messages() []contractsai.Message {
 func (s stubAgent) Middleware() []contractsai.Middleware { return nil }
 
 func (s stubAgent) Tools() []contractsai.Tool { return nil }
+
+func TestNewGeminiFailoverRules(t *testing.T) {
+	t.Run("compiles configured failover rules", func(t *testing.T) {
+		mockConfig := mocksconfig.NewConfig(t)
+		mockConfig.EXPECT().UnmarshalKey("ai.providers.gemini", new(contractsai.ProviderConfig)).RunAndReturn(func(_ string, rawVal any) error {
+			cfg := rawVal.(*contractsai.ProviderConfig)
+			cfg.Key = "test-key"
+			cfg.Failover = map[contractsai.FailoverReason][]string{
+				"context_length_exceeded": {"context length"},
+			}
+			return nil
+		}).Once()
+
+		provider, err := NewGemini(mockConfig, "gemini")
+
+		require.NoError(t, err)
+		require.NotNil(t, provider)
+		require.NotNil(t, provider.failoverRules)
+		assert.Equal(t, "gemini", provider.name)
+
+		reason, ok := provider.failoverRules.Match(providerTestError("maximum context length exceeded"))
+		assert.True(t, ok)
+		assert.Equal(t, contractsai.FailoverReason("context_length_exceeded"), reason)
+	})
+
+	t.Run("returns invalid regex errors", func(t *testing.T) {
+		mockConfig := mocksconfig.NewConfig(t)
+		mockConfig.EXPECT().UnmarshalKey("ai.providers.gemini", new(contractsai.ProviderConfig)).RunAndReturn(func(_ string, rawVal any) error {
+			cfg := rawVal.(*contractsai.ProviderConfig)
+			cfg.Failover = map[contractsai.FailoverReason][]string{
+				"bad_pattern": {"/[/"},
+			}
+			return nil
+		}).Once()
+
+		provider, err := NewGemini(mockConfig, "gemini")
+
+		assert.Nil(t, provider)
+		assert.ErrorIs(t, err, frameworkerrors.AIFailoverPatternInvalid)
+	})
+}
+
+func TestProviderFailoverErrorWrapsDefaultStatusCodes(t *testing.T) {
+	provider := &Provider{name: "gemini-primary"}
+
+	tests := []struct {
+		name       string
+		statusCode int
+		reason     contractsai.FailoverReason
+	}{
+		{
+			name:       "rate limited",
+			statusCode: http.StatusTooManyRequests,
+			reason:     defaultFailoverReasonRateLimited,
+		},
+		{
+			name:       "insufficient credits",
+			statusCode: http.StatusPaymentRequired,
+			reason:     defaultFailoverReasonInsufficientCredits,
+		},
+		{
+			name:       "provider overloaded",
+			statusCode: http.StatusServiceUnavailable,
+			reason:     defaultFailoverReasonProviderOverloaded,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiErr := genai.APIError{Code: tt.statusCode, Message: "provider unavailable"}
+			err := provider.failoverError(apiErr)
+
+			var failoverErr contractsai.FailoverError
+			require.ErrorAs(t, err, &failoverErr)
+			assert.Equal(t, tt.reason, failoverErr.Reason())
+			assert.Equal(t, "gemini-primary", failoverErr.Provider())
+
+			var wrappedErr genai.APIError
+			require.ErrorAs(t, err, &wrappedErr)
+			assert.Equal(t, apiErr.Code, wrappedErr.Code)
+			assert.Equal(t, apiErr.Message, wrappedErr.Message)
+		})
+	}
+}
+
+func TestProviderFailoverErrorReturnsOriginalError(t *testing.T) {
+	provider := &Provider{name: "gemini-primary"}
+
+	nonFailoverErr := genai.APIError{Code: http.StatusBadRequest, Message: "bad request"}
+	err := provider.failoverError(nonFailoverErr)
+
+	assert.Equal(t, nonFailoverErr.Error(), err.Error())
+	var failoverErr contractsai.FailoverError
+	assert.False(t, errors.As(err, &failoverErr))
+	assert.Same(t, assert.AnError, provider.failoverError(assert.AnError))
+}
+
+func TestProviderFailoverErrorUsesConfiguredRules(t *testing.T) {
+	customErr := providerTestError("maximum context length exceeded")
+	rules, err := frameworkai.NewFailoverRules("gemini-primary", map[contractsai.FailoverReason][]string{
+		"context_length_exceeded": {"context length"},
+	})
+	require.NoError(t, err)
+	provider := &Provider{name: "gemini-primary", failoverRules: &rules}
+	err = provider.failoverError(customErr)
+
+	var failoverErr contractsai.FailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	assert.Equal(t, contractsai.FailoverReason("context_length_exceeded"), failoverErr.Reason())
+	assert.Equal(t, "gemini-primary", failoverErr.Provider())
+	assert.ErrorIs(t, err, customErr)
+}
 
 func TestBuildGenerateContentRequestAttachesFollowUpAttachmentsToActiveUserTurn(t *testing.T) {
 	provider := &Provider{}
@@ -290,6 +405,12 @@ func TestParseFunctionCallsDisambiguatesRepeatedGeneratedIDs(t *testing.T) {
 	require.Len(t, toolCalls, 2)
 	assert.Equal(t, "get_weather", toolCalls[0].ID)
 	assert.Equal(t, "get_weather_2", toolCalls[1].ID)
+}
+
+type providerTestError string
+
+func (e providerTestError) Error() string {
+	return string(e)
 }
 
 func assertContentRole(t *testing.T, content *genai.Content, expected string) {

@@ -20,6 +20,33 @@ This registers the service provider and updates `config/ai.go` so `ai.providers.
 
 Or check [the setup file](./setup/setup.go) to install the package manually.
 
+## Custom Failover
+
+The provider marks these Gemini HTTP errors as failoverable by default:
+
+| Status | Reason |
+|--------|--------|
+| `429 Too Many Requests` | `rate_limited` |
+| `402 Payment Required` | `insufficient_credits` |
+| `503 Service Unavailable` | `provider_overloaded` |
+
+Configure `failover` rules to add Gemini-specific error message mappings. Plain strings use substring matching, and slash-delimited strings use Go regular expressions.
+
+```go
+"gemini": map[string]any{
+	"key": config.Env("GEMINI_API_KEY", ""),
+	"failover": map[string][]string{
+		"context_length_exceeded": {
+			"maximum context length",
+			"/(?i)context.*length/",
+		},
+	},
+	"via": func() (ai.Provider, error) {
+		return geminifacades.Gemini("gemini")
+	},
+}
+```
+
 ## Supported capabilities
 
 - Text prompting
